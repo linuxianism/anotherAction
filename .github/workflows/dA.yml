@@ -65,14 +65,11 @@ jobs:
         run: |
           echo "Starting Cloudflare WARP container..."
           
-          # Create network if not exists
           docker network create warp-net || true
           
-          # Stop and remove existing container if it exists
           docker stop warp 2>/dev/null || true
           docker rm warp 2>/dev/null || true
           
-          # Run WARP container
           docker run -d \
             --name warp \
             --restart=always \
@@ -87,7 +84,6 @@ jobs:
           echo "Waiting for WARP to initialize (15 seconds)..."
           sleep 15
           
-          # Check WARP status
           echo "Checking WARP status..."
           for i in {1..5}; do
             RESULT=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
@@ -101,20 +97,12 @@ jobs:
             fi
           done
           
-          FINAL=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
-          if echo "$FINAL" | grep -qE "warp=(on|plus)"; then
-            echo "✅ WARP proxy is ready!"
-          else
-            echo "⚠️ WARP might not be fully active, but continuing anyway..."
-            echo "Response: $FINAL"
-          fi
+          echo "✅ WARP container started"
 
       - name: Setup Download Directory
         run: |
-          # Create repo directory at root
           mkdir -p repo
           
-          # Create backup directory for incremental commits
           BACKUP_DIR="/tmp/file_backup_$$"
           mkdir -p "$BACKUP_DIR"
           echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
@@ -123,7 +111,6 @@ jobs:
           echo "   - repo/ (repository root)"
           echo "   - $BACKUP_DIR (backup location)"
           
-          # Parse URLs
           URLS_RAW="${{ github.event.inputs.file_urls }}"
           read -ra URL_LIST <<< "$URLS_RAW"
           TOTAL_URLS=${#URL_LIST[@]}
@@ -157,11 +144,9 @@ jobs:
           mapfile -t URL_LIST < /tmp/urls.txt
           TOTAL_URLS=${#URL_LIST[@]}
           
-          # Counter for successful downloads
           SUCCESSFUL_DOWNLOADS=0
           FAILED_DOWNLOADS=0
           
-          # Set proxy if WARP is enabled
           if [ "$USE_WARP" = "true" ]; then
             CURL_PROXY="--socks5-hostname 127.0.0.1:1080"
             echo "✅ Using WARP proxy for downloads"
@@ -197,40 +182,30 @@ jobs:
             echo "${NAME}_${RANDOM_SUFFIX}"
           }
           
-          # Function to download with multiple methods
           download_with_methods() {
             local URL="$1"
             local OUTPUT_PATH="$2"
             
-            # Try different download methods
-            local METHODS=(
-              "curl -L --max-time 600 --connect-timeout 30 $CURL_PROXY"
-              "curl -L --max-time 600 --connect-timeout 30 --retry 3 --retry-delay 2 $CURL_PROXY"
-              "curl -L --max-time 600 --connect-timeout 30 --user-agent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' $CURL_PROXY"
-            )
-            
-            # Add wget method if available
-            if command -v wget &> /dev/null; then
-              if [ -n "$CURL_PROXY" ]; then
-                METHODS+=("wget --timeout=600 --tries=3 --execute=socks5-proxy=127.0.0.1:1080 -O")
-              else
-                METHODS+=("wget --timeout=600 --tries=3 -O")
+            echo "  Trying curl with proxy..."
+            if curl -L --max-time 600 --connect-timeout 30 $CURL_PROXY -o "$OUTPUT_PATH" "$URL" 2>&1; then
+              if [ -f "$OUTPUT_PATH" ] && [ -s "$OUTPUT_PATH" ]; then
+                return 0
               fi
             fi
             
-            local METHOD_NUM=0
-            for METHOD in "${METHODS[@]}"; do
-              METHOD_NUM=$((METHOD_NUM + 1))
-              echo "  Trying method $METHOD_NUM/${#METHODS[@]}..."
-              
-              if eval "$METHOD \"$OUTPUT_PATH\" \"$URL\"" 2>&1; then
-                if [ -f "$OUTPUT_PATH" ] && [ -s "$OUTPUT_PATH" ]; then
-                  echo "  ✅ Method $METHOD_NUM successful!"
-                  return 0
-                fi
+            echo "  Trying curl with retries..."
+            if curl -L --max-time 600 --connect-timeout 30 --retry 3 --retry-delay 2 $CURL_PROXY -o "$OUTPUT_PATH" "$URL" 2>&1; then
+              if [ -f "$OUTPUT_PATH" ] && [ -s "$OUTPUT_PATH" ]; then
+                return 0
               fi
-              sleep 2
-            done
+            fi
+            
+            echo "  Trying curl with different user agent..."
+            if curl -L --max-time 600 --connect-timeout 30 --user-agent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' $CURL_PROXY -o "$OUTPUT_PATH" "$URL" 2>&1; then
+              if [ -f "$OUTPUT_PATH" ] && [ -s "$OUTPUT_PATH" ]; then
+                return 0
+              fi
+            fi
             
             return 1
           }
@@ -243,21 +218,17 @@ jobs:
             echo "Downloading $URL_INDEX / $TOTAL_URLS : $URL"
             echo "============================================================"
             
-            # Extract filename from URL
             FILENAME=$(basename "$URL" | sed 's/?.*//' | sed 's/#.*//')
             if [[ -z "$FILENAME" || "$FILENAME" == *"="* || "$FILENAME" == *"?"* ]]; then
               FILENAME="file_$(date +%Y%m%d_%H%M%S)_${URL_INDEX}"
             fi
             
-            # Remove query parameters and fragments from filename
             FILENAME=$(echo "$FILENAME" | sed 's/?.*//' | sed 's/#.*//')
             
-            # Create temporary download directory
             TMP_DIR="tmp_download_${URL_INDEX}"
             mkdir -p "$TMP_DIR"
             DOWNLOAD_PATH="$TMP_DIR/$FILENAME"
             
-            # Check if URL is accessible first
             echo "Checking URL accessibility..."
             HTTP_STATUS=$(curl -L -s -o /dev/null -w "%{http_code}" --max-time 30 $CURL_PROXY "$URL")
             
@@ -270,7 +241,6 @@ jobs:
             
             echo "HTTP Status: $HTTP_STATUS"
             
-            # Get file size before download
             CONTENT_LENGTH=$(curl -sI -L $CURL_PROXY "$URL" | grep -i content-length | awk '{print $2}' | tr -d '\r' | head -1)
             if [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ]; then
               EXPECTED_SIZE=$CONTENT_LENGTH
@@ -278,10 +248,8 @@ jobs:
               echo "Expected file size: $EXPECTED_MB MB"
             fi
             
-            # Download file using multiple methods
             echo "Downloading: $FILENAME"
             if download_with_methods "$URL" "$DOWNLOAD_PATH"; then
-              # Verify download
               if [ ! -f "$DOWNLOAD_PATH" ]; then
                 echo "❌ No file created for: $URL"
                 FAILED_DOWNLOADS=$((FAILED_DOWNLOADS + 1))
@@ -289,7 +257,6 @@ jobs:
                 continue
               fi
               
-              # Check file size
               SIZE=$(stat -c%s "$DOWNLOAD_PATH" 2>/dev/null || stat -f%z "$DOWNLOAD_PATH" 2>/dev/null)
               
               if [ "$SIZE" -eq 0 ]; then
@@ -299,7 +266,6 @@ jobs:
                 continue
               fi
               
-              # Compare with expected size if available
               if [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ]; then
                 if [ "$SIZE" -ne "$EXPECTED_SIZE" ]; then
                   echo "⚠️ Size mismatch: Downloaded ${SIZE} bytes, expected ${EXPECTED_SIZE} bytes"
@@ -325,15 +291,12 @@ jobs:
               EXT=".${EXT}"
             fi
             
-            # Create folder for this file
             FINAL_FOLDER_NAME=$(get_unique_folder "repo" "$SANITIZED_NAME")
             mkdir -p "$BACKUP_DIR/${FINAL_FOLDER_NAME}"
             echo "Created folder: $FINAL_FOLDER_NAME"
             
-            # Save mapping for master README
             echo "${SANITIZED_NAME}|${FINAL_FOLDER_NAME}|${URL}" >> /tmp/file_info.txt
             
-            # Process file based on size
             if [ "$SIZE" -gt "$SPLIT_BYTES" ]; then
               echo "📦 File exceeds ${SPLIT_MB}MB, splitting into parts..."
               
@@ -353,7 +316,6 @@ jobs:
                 continue
               fi
               
-              # Verify split parts exist and have content
               PART_COUNT=0
               TOTAL_PARTS_SIZE=0
               for part_file in "$BACKUP_DIR/${FINAL_FOLDER_NAME}"/*.zip "$BACKUP_DIR/${FINAL_FOLDER_NAME}"/*.z[0-9]*; do
@@ -374,23 +336,20 @@ jobs:
               
               echo "✅ Created $PART_COUNT parts (total: $((TOTAL_PARTS_SIZE / 1024 / 1024)) MB)"
               
-              # Generate README for split file
               README_FILE="$BACKUP_DIR/${FINAL_FOLDER_NAME}/README.md"
-              cat > "$README_FILE" << 'EOF'
-# ${SANITIZED_NAME}
-
----
-
-## File Information
-
-| Property | Value |
-|----------|-------|
-| **Original Name** | `${FILENAME}` |
-| **Source URL** | [Download Source](${URL}) |
-| **File Size** | **${SIZE_MB} MB** |
-| **Split Size** | ${SPLIT_MB}MB per part |
-| **Parts** | ${PART_COUNT} parts |
-EOF
+              echo "# ${SANITIZED_NAME}" > "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "---" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "## File Information" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "| Property | Value |" >> "$README_FILE"
+              echo "|----------|-------|" >> "$README_FILE"
+              echo "| **Original Name** | \`${FILENAME}\` |" >> "$README_FILE"
+              echo "| **Source URL** | [Download Source](${URL}) |" >> "$README_FILE"
+              echo "| **File Size** | **${SIZE_MB} MB** |" >> "$README_FILE"
+              echo "| **Split Size** | ${SPLIT_MB}MB per part |" >> "$README_FILE"
+              echo "| **Parts** | ${PART_COUNT} parts |" >> "$README_FILE"
               if [ -n "$ZIP_PASSWORD" ]; then
                 echo "| **Password Protected** | **YES** |" >> "$README_FILE"
               else
@@ -399,18 +358,15 @@ EOF
               if [ "$USE_WARP" = "true" ]; then
                 echo "| **Proxy Used** | Cloudflare WARP |" >> "$README_FILE"
               fi
-              
-              cat >> "$README_FILE" << 'EOF'
-
----
-
-## Download Links
-
-> ⬇️ Download **all parts**, then open `${FINAL_FOLDER_NAME}.zip`
-
-| # | File | Link |
-|---|------|------|
-EOF
+              echo "" >> "$README_FILE"
+              echo "---" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "## Download Links" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "> ⬇️ Download **all parts**, then open \`${FINAL_FOLDER_NAME}.zip\`" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "| # | File | Link |" >> "$README_FILE"
+              echo "|---|------|------|" >> "$README_FILE"
               
               LINK_NUM=0
               for part_file in $(ls "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.zip "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.z[0-9]* 2>/dev/null | sort -V); do
@@ -432,7 +388,6 @@ EOF
               SUCCESSFUL_DOWNLOADS=$((SUCCESSFUL_DOWNLOADS + 1))
               
             else
-              # Small file - copy directly or create single zip
               if [ -n "$ZIP_PASSWORD" ]; then
                 echo "🔒 Creating password-protected zip archive..."
                 zip -0 -P "${ZIP_PASSWORD}" \
@@ -447,7 +402,6 @@ EOF
                   continue
                 fi
                 
-                # Verify zip file
                 if [ ! -s "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.zip" ]; then
                   echo "❌ Created zip is 0 bytes"
                   FAILED_DOWNLOADS=$((FAILED_DOWNLOADS + 1))
@@ -469,7 +423,6 @@ EOF
                   continue
                 fi
                 
-                # Verify copied file size
                 COPIED_SIZE=$(stat -c%s "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}${EXT}" 2>/dev/null || echo 0)
                 if [ "$COPIED_SIZE" -eq 0 ]; then
                   echo "❌ Copied file is 0 bytes: $FILENAME"
@@ -482,25 +435,22 @@ EOF
                 ARCHIVE_NAME="${FINAL_FOLDER_NAME}${EXT}"
               fi
               
-              # Generate README for single file
               FOLDER_ENCODED=$(urlencode "$FINAL_FOLDER_NAME")
               FILE_ENCODED=$(urlencode "$ARCHIVE_NAME")
               RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/repo/${FOLDER_ENCODED}/${FILE_ENCODED}"
               
               README_FILE="$BACKUP_DIR/${FINAL_FOLDER_NAME}/README.md"
-              cat > "$README_FILE" << 'EOF'
-# ${SANITIZED_NAME}
-
----
-
-## File Information
-
-| Property | Value |
-|----------|-------|
-| **Original Name** | `${FILENAME}` |
-| **Source URL** | [Download Source](${URL}) |
-| **File Size** | **${SIZE_MB} MB** |
-EOF
+              echo "# ${SANITIZED_NAME}" > "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "---" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "## File Information" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "| Property | Value |" >> "$README_FILE"
+              echo "|----------|-------|" >> "$README_FILE"
+              echo "| **Original Name** | \`${FILENAME}\` |" >> "$README_FILE"
+              echo "| **Source URL** | [Download Source](${URL}) |" >> "$README_FILE"
+              echo "| **File Size** | **${SIZE_MB} MB** |" >> "$README_FILE"
               if [ -n "$ZIP_PASSWORD" ]; then
                 echo "| **Password Protected** | **YES** |" >> "$README_FILE"
               else
@@ -509,26 +459,22 @@ EOF
               if [ "$USE_WARP" = "true" ]; then
                 echo "| **Proxy Used** | Cloudflare WARP |" >> "$README_FILE"
               fi
-              
-              cat >> "$README_FILE" << 'EOF'
-
----
-
-## Download Link
-
-| # | File | Link |
-|---|------|------|
-| 1 | `${ARCHIVE_NAME}` | [Download](${RAW_LINK}) |
-
----
-
-*Downloaded using GitHub Actions File Downloader with WARP support*
-EOF
+              echo "" >> "$README_FILE"
+              echo "---" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "## Download Link" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "| # | File | Link |" >> "$README_FILE"
+              echo "|---|------|------|" >> "$README_FILE"
+              echo "| 1 | \`${ARCHIVE_NAME}\` | [Download](${RAW_LINK}) |" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "---" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "*Downloaded using GitHub Actions File Downloader with WARP support*" >> "$README_FILE"
               
               SUCCESSFUL_DOWNLOADS=$((SUCCESSFUL_DOWNLOADS + 1))
             fi
             
-            # Cleanup temp directory
             rm -rf "$TMP_DIR"
             echo "✅ Finished processing: $FILENAME"
           done
@@ -541,7 +487,6 @@ EOF
           echo "❌ Failed downloads: $FAILED_DOWNLOADS"
           echo "=========================================="
           
-          # Save success count for later steps
           echo "$SUCCESSFUL_DOWNLOADS" > /tmp/successful_count.txt
           
           if [ "$SUCCESSFUL_DOWNLOADS" -eq 0 ]; then
@@ -566,7 +511,6 @@ EOF
           COMMIT_MSG="${{ github.event.inputs.commit_message }}"
           BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
           
-          # Check if we have any successful downloads
           SUCCESSFUL_COUNT=$(cat /tmp/successful_count.txt 2>/dev/null || echo "0")
           if [ "$SUCCESSFUL_COUNT" -eq 0 ]; then
             echo "No successful downloads. Skipping push."
@@ -592,17 +536,14 @@ EOF
           regenerate_master_readme() {
             MASTER_README="repo/README.md"
             
-            echo "Regenerating master README..."
-            {
-              echo "# 📁 Downloaded Files"
-              echo ""
-              echo "This directory contains files downloaded using the GitHub Actions File Downloader."
-              echo ""
-              echo "---"
-              echo ""
-              echo "| # | Folder | Size | Link |"
-              echo "|---|--------|------|------|"
-            } > "$MASTER_README"
+            echo "# 📁 Downloaded Files" > "$MASTER_README"
+            echo "" >> "$MASTER_README"
+            echo "This directory contains files downloaded using the GitHub Actions File Downloader." >> "$MASTER_README"
+            echo "" >> "$MASTER_README"
+            echo "---" >> "$MASTER_README"
+            echo "" >> "$MASTER_README"
+            echo "| # | Folder | Size | Link |" >> "$MASTER_README"
+            echo "|---|--------|------|------|" >> "$MASTER_README"
             
             NUM=0
             for folder in repo/*/; do
@@ -614,7 +555,6 @@ EOF
               FOLDER_ENCODED=$(urlencode "$FOLDER_NAME")
               FOLDER_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/tree/${BRANCH}/repo/${FOLDER_ENCODED}"
               
-              # Get file size info from README
               SIZE_INFO=$(grep "File Size" "$folder/README.md" | head -1 | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
               
               echo "| $NUM | \`$FOLDER_NAME\` | ${SIZE_INFO:-Unknown} | [View]($FOLDER_LINK) |" >> "$MASTER_README"
@@ -627,12 +567,6 @@ EOF
             echo "" >> "$MASTER_README"
             echo "---" >> "$MASTER_README"
             echo "*Total: $NUM files*" >> "$MASTER_README"
-            echo "" >> "$MASTER_README"
-            echo "## Download Instructions" >> "$MASTER_README"
-            echo "" >> "$MASTER_README"
-            echo "1. Click **View** on any folder to see its contents" >> "$MASTER_README"
-            echo "2. Download all parts for split files" >> "$MASTER_README"
-            echo "3. Extract using the instructions in each folder's README" >> "$MASTER_README"
             
             echo "✅ Master README regenerated with $NUM files"
           }
@@ -642,7 +576,6 @@ EOF
             local MAX_RETRIES=5
             local RETRY=0
             
-            # Skip 0-byte files
             if [ -f "$FILE_PATH" ] && [ ! -s "$FILE_PATH" ]; then
               echo "  Skipping 0-byte file: $(basename "$FILE_PATH")"
               return 0
@@ -695,7 +628,6 @@ EOF
             local TOTAL_FILES=${#FILES[@]}
             
             for FILE in "${FILES[@]}"; do
-              # Skip 0-byte files
               if [ -f "$FILE" ] && [ ! -s "$FILE" ]; then
                 continue
               fi
@@ -780,16 +712,13 @@ EOF
             fi
           }
           
-          # Sync with remote
           echo "Syncing with remote repository..."
           git fetch origin "$BRANCH"
           git reset --hard origin/"$BRANCH"
           
-          # Create repo directory and copy only non-zero files
           mkdir -p repo
           find "$BACKUP_DIR" -type f -size +0 -exec cp --parents {} repo/ \; 2>/dev/null || true
           
-          # Collect all non-zero files to push
           ALL_FILES=()
           while IFS= read -r -d '' FILE; do
             if [ -s "$FILE" ]; then
@@ -805,8 +734,30 @@ EOF
             exit 0
           fi
           
-          # Calculate total size
           TOTAL_SIZE=0
           for F in "${ALL_FILES[@]}"; do
             if [ -f "$F" ]; then
-              FSIZE=$(stat -c%s "$F" 2>/
+              FSIZE=$(stat -c%s "$F" 2>/dev/null || echo 0)
+              TOTAL_SIZE=$((TOTAL_SIZE + FSIZE))
+            fi
+          done
+          TOTAL_SIZE_MB=$((TOTAL_SIZE / 1024 / 1024))
+          echo "Total size: ${TOTAL_SIZE_MB}MB"
+          
+          if [ $TOTAL_SIZE_MB -lt 100 ]; then
+            echo "📦 Small upload (${TOTAL_SIZE_MB}MB) - pushing all at once..."
+            
+            regenerate_master_readme
+            git add repo/
+            
+            if ! git diff --cached --quiet; then
+              git commit -m "$COMMIT_MSG [skip ci]"
+              
+              PUSH_RETRY=0
+              while [ $PUSH_RETRY -lt 10 ]; do
+                PUSH_RETRY=$((PUSH_RETRY + 1))
+                if timeout 300 git push origin HEAD:"$BRANCH"; then
+                  echo "✅ Push successful!"
+                  break
+                else
+                  echo "⚠️ Push failed,
