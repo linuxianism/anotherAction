@@ -52,7 +52,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl wget pv zip unzip p7zip-full jq bc
+          sudo apt-get install -y curl wget zip unzip p7zip-full jq bc
 
       - name: Setup Download Directory
         run: |
@@ -100,6 +100,10 @@ jobs:
           mapfile -t URL_LIST < /tmp/urls.txt
           TOTAL_URLS=${#URL_LIST[@]}
           
+          # Counter for successful downloads
+          SUCCESSFUL_DOWNLOADS=0
+          FAILED_DOWNLOADS=0
+          
           sanitize_name() {
             echo "$1" | sed 's/[^a-zA-Z0-9._-]/_/g' | sed 's/___*/_/g' | sed 's/^_//;s/_$//'
           }
@@ -136,10 +140,74 @@ jobs:
             echo "============================================================"
             
             # Extract filename from URL
-            FILENAME=$(basename "$URL" | sed 's/?.*//')
-            if [[ -z "$FILENAME" || "$FILENAME" == *"="* ]]; then
+            FILENAME=$(basename "$URL" | sed 's/?.*//' | sed 's/#.*//')
+            if [[ -z "$FILENAME" || "$FILENAME" == *"="* || "$FILENAME" == *"?"* ]]; then
               FILENAME="file_$(date +%Y%m%d_%H%M%S)_${URL_INDEX}"
             fi
+            
+            # Remove query parameters and fragments from filename
+            FILENAME=$(echo "$FILENAME" | sed 's/?.*//' | sed 's/#.*//')
+            
+            # Create temporary download directory
+            TMP_DIR="tmp_download_${URL_INDEX}"
+            mkdir -p "$TMP_DIR"
+            
+            # Check if URL is accessible first
+            echo "Checking URL accessibility..."
+            HTTP_STATUS=$(curl -L -s -o /dev/null -w "%{http_code}" --max-time 30 "$URL")
+            
+            if [ "$HTTP_STATUS" != "200" ]; then
+              echo "❌ URL returned HTTP $HTTP_STATUS - skipping"
+              FAILED_DOWNLOADS=$((FAILED_DOWNLOADS + 1))
+              rm -rf "$TMP_DIR"
+              continue
+            fi
+            
+            # Get file size before download
+            CONTENT_LENGTH=$(curl -sI -L "$URL" | grep -i content-length | awk '{print $2}' | tr -d '\r' | head -1)
+            
+            # Download file
+            echo "Downloading: $FILENAME"
+            curl -L --progress-bar -o "$TMP_DIR/$FILENAME" "$URL" --max-time 600 --connect-timeout 30
+            CURL_EXIT=$?
+            
+            # Verify download
+            if [ $CURL_EXIT -ne 0 ]; then
+              echo "❌ Download failed (curl exit code: $CURL_EXIT) for: $URL"
+              FAILED_DOWNLOADS=$((FAILED_DOWNLOADS + 1))
+              rm -rf "$TMP_DIR"
+              continue
+            fi
+            
+            # Check if file was actually downloaded
+            if [ ! -f "$TMP_DIR/$FILENAME" ]; then
+              echo "❌ No file created for: $URL"
+              FAILED_DOWNLOADS=$((FAILED_DOWNLOADS + 1))
+              rm -rf "$TMP_DIR"
+              continue
+            fi
+            
+            # Check file size
+            SIZE=$(stat -c%s "$TMP_DIR/$FILENAME" 2>/dev/null || stat -f%z "$TMP_DIR/$FILENAME" 2>/dev/null)
+            
+            if [ "$SIZE" -eq 0 ]; then
+              echo "❌ Downloaded file is 0 bytes for: $URL"
+              FAILED_DOWNLOADS=$((FAILED_DOWNLOADS + 1))
+              rm -rf "$TMP_DIR"
+              continue
+            fi
+            
+            # Compare with expected size if available
+            if [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ]; then
+              EXPECTED_SIZE=$CONTENT_LENGTH
+              if [ "$SIZE" -ne "$EXPECTED_SIZE" ]; then
+                echo "⚠️ Size mismatch: Downloaded ${SIZE} bytes, expected ${EXPECTED_SIZE} bytes"
+                # Still accept the file but warn
+              fi
+            fi
+            
+            SIZE_MB=$(echo "scale=2; $SIZE / 1024 / 1024" | bc)
+            echo "✅ Successfully downloaded: $FILENAME ($SIZE_MB MB)"
             
             SANITIZED_NAME=$(sanitize_name "${FILENAME%.*}")
             EXT="${FILENAME##*.}"
@@ -149,31 +217,10 @@ jobs:
               EXT=".${EXT}"
             fi
             
-            # Create temporary download directory
-            TMP_DIR="tmp_download_${URL_INDEX}"
-            mkdir -p "$TMP_DIR"
-            
-            # Download file with progress
-            echo "Downloading: $FILENAME"
-            curl -L --progress-bar -o "$TMP_DIR/$FILENAME" "$URL"
-            
-            if [ $? -ne 0 ] || [ ! -f "$TMP_DIR/$FILENAME" ]; then
-              echo "❌ Download failed for: $URL"
-              rm -rf "$TMP_DIR"
-              continue
-            fi
-            
-            SIZE=$(stat -c%s "$TMP_DIR/$FILENAME" 2>/dev/null || stat -f%z "$TMP_DIR/$FILENAME" 2>/dev/null)
-            SIZE_MB=$(echo "scale=2; $SIZE / 1024 / 1024" | bc)
-            echo "✅ Downloaded: $FILENAME ($SIZE_MB MB)"
-            
             # Create folder for this file
             FINAL_FOLDER_NAME=$(get_unique_folder "repo" "$SANITIZED_NAME")
             mkdir -p "$BACKUP_DIR/${FINAL_FOLDER_NAME}"
             echo "Created folder: $FINAL_FOLDER_NAME"
-            
-            # Save mapping for master README
-            echo "${SANITIZED_NAME}|${FINAL_FOLDER_NAME}|${URL}" >> /tmp/file_info.txt
             
             # Process file based on size
             if [ "$SIZE" -gt "$SPLIT_BYTES" ]; then
@@ -185,6 +232,14 @@ jobs:
                 7z a -tzip -v${SPLIT_MB}m -p"${ZIP_PASSWORD}" -mx=0 "${ARCHIVE_BASE}.zip" "$TMP_DIR/$FILENAME"
               else
                 zip -0 -s ${SPLIT_MB}m "${ARCHIVE_BASE}.zip" "$TMP_DIR/$FILENAME"
+              fi
+              
+              if [ $? -ne 0 ]; then
+                echo "❌ Failed to split file: $FILENAME"
+                FAILED_DOWNLOADS=$((FAILED_DOWNLOADS + 1))
+                rm -rf "$TMP_DIR"
+                rm -rf "$BACKUP_DIR/${FINAL_FOLDER_NAME}"
+                continue
               fi
               
               PART_COUNT=$(ls "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.zip "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.z[0-9]* 2>/dev/null | wc -l)
@@ -202,9 +257,9 @@ jobs:
               echo "|----------|-------|" >> "$README_FILE"
               echo "| **Original Name** | \`${FILENAME}\` |" >> "$README_FILE"
               echo "| **Source URL** | [Download Source](${URL}) |" >> "$README_FILE"
-              echo "| **Total Size** | **${PART_COUNT} parts** - **${SIZE_MB} MB** |" >> "$README_FILE"
+              echo "| **File Size** | **${SIZE_MB} MB** |" >> "$README_FILE"
               echo "| **Split Size** | ${SPLIT_MB}MB per part |" >> "$README_FILE"
-              echo "| **Status** | **Complete (100%)** |" >> "$README_FILE"
+              echo "| **Parts** | ${PART_COUNT} parts |" >> "$README_FILE"
               if [ -n "$ZIP_PASSWORD" ]; then
                 echo "| **Password Protected** | **YES** |" >> "$README_FILE"
               else
@@ -215,7 +270,7 @@ jobs:
               echo "" >> "$README_FILE"
               echo "## Download Links" >> "$README_FILE"
               echo "" >> "$README_FILE"
-              echo "> ⬇️ Download **all parts**, then open \`${FINAL_FOLDER_NAME}.zip\` — the other parts are found automatically." >> "$README_FILE"
+              echo "> ⬇️ Download **all parts**, then open \`${FINAL_FOLDER_NAME}.zip\`" >> "$README_FILE"
               echo "" >> "$README_FILE"
               echo "| # | File | Link |" >> "$README_FILE"
               echo "|---|------|------|" >> "$README_FILE"
@@ -235,24 +290,9 @@ jobs:
               echo "" >> "$README_FILE"
               echo "---" >> "$README_FILE"
               echo "" >> "$README_FILE"
-              echo "## How to Extract" >> "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "Download all parts into the **same folder**, then:" >> "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "| OS | Steps |" >> "$README_FILE"
-              echo "|----|-------|" >> "$README_FILE"
-              echo "| **Windows** | Right-click \`${FINAL_FOLDER_NAME}.zip\` → *Extract Here* (needs [7-Zip](https://www.7-zip.org/))" >> "$README_FILE"
-              if [ -n "$ZIP_PASSWORD" ]; then
-                echo "| **Mac** | Open with [Keka](https://www.keka.io/) → enter password |" >> "$README_FILE"
-                echo "| **Linux** | \`unzip ${FINAL_FOLDER_NAME}.zip\` → enter password |" >> "$README_FILE"
-              else
-                echo "| **Mac** | Double-click \`${FINAL_FOLDER_NAME}.zip\` — extracts with Archive Utility |" >> "$README_FILE"
-                echo "| **Linux** | \`unzip ${FINAL_FOLDER_NAME}.zip\` |" >> "$README_FILE"
-              fi
-              echo "" >> "$README_FILE"
-              echo "---" >> "$README_FILE"
-              echo "" >> "$README_FILE"
               echo "*Downloaded using GitHub Actions File Downloader*" >> "$README_FILE"
+              
+              SUCCESSFUL_DOWNLOADS=$((SUCCESSFUL_DOWNLOADS + 1))
               
             else
               # Small file - copy directly or create single zip
@@ -261,11 +301,37 @@ jobs:
                 zip -0 -P "${ZIP_PASSWORD}" \
                   "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.zip" \
                   "$TMP_DIR/$FILENAME"
+                
+                if [ $? -ne 0 ]; then
+                  echo "❌ Failed to create zip for: $FILENAME"
+                  FAILED_DOWNLOADS=$((FAILED_DOWNLOADS + 1))
+                  rm -rf "$TMP_DIR"
+                  rm -rf "$BACKUP_DIR/${FINAL_FOLDER_NAME}"
+                  continue
+                fi
                 ARCHIVE_NAME="${FINAL_FOLDER_NAME}.zip"
               else
-                echo "📁 Copying file directly (no archive needed)..."
+                echo "📁 Copying file directly..."
                 cp "$TMP_DIR/$FILENAME" "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}${EXT}"
+                
+                if [ $? -ne 0 ] || [ ! -f "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}${EXT}" ]; then
+                  echo "❌ Failed to copy file: $FILENAME"
+                  FAILED_DOWNLOADS=$((FAILED_DOWNLOADS + 1))
+                  rm -rf "$TMP_DIR"
+                  rm -rf "$BACKUP_DIR/${FINAL_FOLDER_NAME}"
+                  continue
+                fi
                 ARCHIVE_NAME="${FINAL_FOLDER_NAME}${EXT}"
+              fi
+              
+              # Verify copied file size
+              COPIED_SIZE=$(stat -c%s "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${ARCHIVE_NAME}" 2>/dev/null || echo 0)
+              if [ "$COPIED_SIZE" -eq 0 ]; then
+                echo "❌ Copied file is 0 bytes: $FILENAME"
+                FAILED_DOWNLOADS=$((FAILED_DOWNLOADS + 1))
+                rm -rf "$TMP_DIR"
+                rm -rf "$BACKUP_DIR/${FINAL_FOLDER_NAME}"
+                continue
               fi
               
               # Generate README for single file
@@ -284,8 +350,7 @@ jobs:
               echo "|----------|-------|" >> "$README_FILE"
               echo "| **Original Name** | \`${FILENAME}\` |" >> "$README_FILE"
               echo "| **Source URL** | [Download Source](${URL}) |" >> "$README_FILE"
-              echo "| **Total Size** | **${SIZE_MB} MB** |" >> "$README_FILE"
-              echo "| **Status** | **Complete (100%)** |" >> "$README_FILE"
+              echo "| **File Size** | **${SIZE_MB} MB** |" >> "$README_FILE"
               if [ -n "$ZIP_PASSWORD" ]; then
                 echo "| **Password Protected** | **YES** |" >> "$README_FILE"
               else
@@ -303,24 +368,46 @@ jobs:
               echo "---" >> "$README_FILE"
               echo "" >> "$README_FILE"
               echo "*Downloaded using GitHub Actions File Downloader*" >> "$README_FILE"
+              
+              SUCCESSFUL_DOWNLOADS=$((SUCCESSFUL_DOWNLOADS + 1))
             fi
             
-            # Cleanup
+            # Cleanup temp directory
             rm -rf "$TMP_DIR"
             echo "✅ Finished processing: $FILENAME"
           done
           
           echo ""
-          echo "===== Backup directory contents ====="
-          find "$BACKUP_DIR" -type f | head -50
+          echo "=========================================="
+          echo "Download Summary"
+          echo "=========================================="
+          echo "✅ Successful downloads: $SUCCESSFUL_DOWNLOADS"
+          echo "❌ Failed downloads: $FAILED_DOWNLOADS"
+          echo "=========================================="
+          
+          # Save success count for later steps
+          echo "$SUCCESSFUL_DOWNLOADS" > /tmp/successful_count.txt
+          
+          if [ "$SUCCESSFUL_DOWNLOADS" -eq 0 ]; then
+            echo "No successful downloads. Exiting without push."
+            exit 1
+          fi
 
       - name: Incremental Commit and Push
+        if: success()
         run: |
           BRANCH="${GITHUB_REF_NAME}"
           REPO_OWNER="${{ github.repository_owner }}"
           REPO_NAME="${{ github.event.repository.name }}"
           COMMIT_MSG="${{ github.event.inputs.commit_message }}"
           BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
+          
+          # Check if we have any successful downloads
+          SUCCESSFUL_COUNT=$(cat /tmp/successful_count.txt 2>/dev/null || echo "0")
+          if [ "$SUCCESSFUL_COUNT" -eq 0 ]; then
+            echo "No successful downloads. Skipping push."
+            exit 0
+          fi
           
           echo "=========================================="
           echo "Starting Incremental Push Process"
@@ -330,7 +417,14 @@ jobs:
           echo "Files to push: $BACKUP_FILE_COUNT"
           
           if [ "$BACKUP_FILE_COUNT" -eq 0 ]; then
-            echo "⚠️ No files to push — downloads may have failed."
+            echo "⚠️ No files in backup directory — skipping push."
+            exit 0
+          fi
+          
+          # Verify backup directory has non-zero files
+          NON_ZERO_FILES=$(find "$BACKUP_DIR" -type f -size +0 2>/dev/null | wc -l)
+          if [ "$NON_ZERO_FILES" -eq 0 ]; then
+            echo "⚠️ All files in backup are 0 bytes — skipping push."
             exit 0
           fi
           
@@ -347,8 +441,8 @@ jobs:
               echo ""
               echo "---"
               echo ""
-              echo "| # | File | Size | Link |"
-              echo "|---|------|------|------|"
+              echo "| # | Folder | Size | Link |"
+              echo "|---|--------|------|------|"
             } > "$MASTER_README"
             
             NUM=0
@@ -362,10 +456,14 @@ jobs:
               FOLDER_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/tree/${BRANCH}/repo/${FOLDER_ENCODED}"
               
               # Get file size info from README
-              SIZE_INFO=$(grep "Total Size" "$folder/README.md" | head -1 | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+              SIZE_INFO=$(grep "File Size" "$folder/README.md" | head -1 | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
               
               echo "| $NUM | \`$FOLDER_NAME\` | ${SIZE_INFO:-Unknown} | [View]($FOLDER_LINK) |" >> "$MASTER_README"
             done
+            
+            if [ $NUM -eq 0 ]; then
+              echo "| - | *No files downloaded yet* | - | - |" >> "$MASTER_README"
+            fi
             
             echo "" >> "$MASTER_README"
             echo "---" >> "$MASTER_README"
@@ -377,6 +475,12 @@ jobs:
             local FILE_PATH="$1"
             local MAX_RETRIES=5
             local RETRY=0
+            
+            # Skip 0-byte files
+            if [ -f "$FILE_PATH" ] && [ ! -s "$FILE_PATH" ]; then
+              echo "  Skipping 0-byte file: $(basename "$FILE_PATH")"
+              return 0
+            fi
             
             while [ $RETRY -lt $MAX_RETRIES ]; do
               RETRY=$((RETRY + 1))
@@ -425,6 +529,11 @@ jobs:
             local TOTAL_FILES=${#FILES[@]}
             
             for FILE in "${FILES[@]}"; do
+              # Skip 0-byte files
+              if [ -f "$FILE" ] && [ ! -s "$FILE" ]; then
+                continue
+              fi
+              
               BATCH_FILES+=("$FILE")
               BATCH_COUNT=$((BATCH_COUNT + 1))
               
@@ -510,21 +619,23 @@ jobs:
           git fetch origin "$BRANCH"
           git reset --hard origin/"$BRANCH"
           
-          # Create repo directory and copy files
+          # Create repo directory and copy files (only non-zero files)
           mkdir -p repo
-          cp -r "$BACKUP_DIR"/* repo/
+          find "$BACKUP_DIR" -type f -size +0 -exec cp --parents {} repo/ \; 2>/dev/null || true
           
-          # Collect all files to push
+          # Collect all non-zero files to push
           ALL_FILES=()
           while IFS= read -r -d '' FILE; do
-            ALL_FILES+=("$FILE")
+            if [ -s "$FILE" ]; then  # Only include non-empty files
+              ALL_FILES+=("$FILE")
+            fi
           done < <(find repo -type f -print0 2>/dev/null | sort -z)
           
           TOTAL_FILES=${#ALL_FILES[@]}
-          echo "Found $TOTAL_FILES files to push"
+          echo "Found $TOTAL_FILES non-zero files to push"
           
           if [ $TOTAL_FILES -eq 0 ]; then
-            echo "No files to push!"
+            echo "No valid files to push!"
             exit 0
           fi
           
@@ -561,7 +672,7 @@ jobs:
                   git fetch origin "$BRANCH"
                   git reset --hard origin/"$BRANCH"
                   mkdir -p repo
-                  cp -r "$BACKUP_DIR"/* repo/
+                  find "$BACKUP_DIR" -type f -size +0 -exec cp --parents {} repo/ \; 2>/dev/null || true
                   regenerate_master_readme
                   git add repo/
                   git commit -m "$COMMIT_MSG [skip ci]" 2>/dev/null || true
@@ -578,7 +689,7 @@ jobs:
             git fetch origin "$BRANCH" --quiet 2>/dev/null || true
             git reset --hard origin/"$BRANCH" 2>/dev/null || true
             mkdir -p repo
-            cp -r "$BACKUP_DIR"/* repo/ 2>/dev/null || true
+            find "$BACKUP_DIR" -type f -size +0 -exec cp --parents {} repo/ \; 2>/dev/null || true
             
             regenerate_master_readme
             git add repo/README.md
@@ -611,5 +722,5 @@ jobs:
         run: |
           BACKUP_DIR=$(cat /tmp/backup_dir_path.txt 2>/dev/null || echo "")
           [ -n "$BACKUP_DIR" ] && rm -rf "$BACKUP_DIR"
-          rm -f /tmp/backup_dir_path.txt /tmp/urls.txt /tmp/file_info.txt
+          rm -f /tmp/backup_dir_path.txt /tmp/urls.txt /tmp/file_info.txt /tmp/successful_count.txt
           echo "🧹 Cleanup complete"
