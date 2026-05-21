@@ -144,7 +144,7 @@ jobs:
             SANITIZED_NAME=$(sanitize_name "${FILENAME%.*}")
             EXT="${FILENAME##*.}"
             if [[ "$EXT" == "$FILENAME" ]]; then
-              EXT=""  # No extension
+              EXT=""
             else
               EXT=".${EXT}"
             fi
@@ -155,12 +155,7 @@ jobs:
             
             # Download file with progress
             echo "Downloading: $FILENAME"
-            if command -v pv &> /dev/null; then
-              curl -L --progress-bar "$URL" | pv -s $(curl -sI "$URL" | grep -i content-length | awk '{print $2}' | tr -d '\r') > "$TMP_DIR/$FILENAME" 2>/dev/null || \
-              curl -L -o "$TMP_DIR/$FILENAME" "$URL"
-            else
-              curl -L -o "$TMP_DIR/$FILENAME" "$URL"
-            fi
+            curl -L --progress-bar -o "$TMP_DIR/$FILENAME" "$URL"
             
             if [ $? -ne 0 ] || [ ! -f "$TMP_DIR/$FILENAME" ]; then
               echo "❌ Download failed for: $URL"
@@ -196,31 +191,34 @@ jobs:
               echo "✅ Created $PART_COUNT parts"
               
               # Generate README for split file
-              cat > "$BACKUP_DIR/${FINAL_FOLDER_NAME}/README.md" << EOF
-# ${SANITIZED_NAME}
-
----
-
-## File Information
-
-| Property | Value |
-|----------|-------|
-| **Original Name** | \`${FILENAME}\` |
-| **Source URL** | [Download Source](${URL}) |
-| **Total Size** | **${PART_COUNT} parts** - **${SIZE_MB} MB** |
-| **Split Size** | ${SPLIT_MB}MB per part |
-| **Status** | **Complete (100%)** |
-| **Password Protected** | **$( [ -n "$ZIP_PASSWORD" ] && echo "YES" || echo "NO" )** |
-
----
-
-## Download Links
-
-> ⬇️ Download **all parts**, then open \`${FINAL_FOLDER_NAME}.zip\` — the other parts are found automatically.
-
-| # | File | Link |
-|---|------|------|
-EOF
+              README_FILE="$BACKUP_DIR/${FINAL_FOLDER_NAME}/README.md"
+              echo "# ${SANITIZED_NAME}" > "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "---" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "## File Information" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "| Property | Value |" >> "$README_FILE"
+              echo "|----------|-------|" >> "$README_FILE"
+              echo "| **Original Name** | \`${FILENAME}\` |" >> "$README_FILE"
+              echo "| **Source URL** | [Download Source](${URL}) |" >> "$README_FILE"
+              echo "| **Total Size** | **${PART_COUNT} parts** - **${SIZE_MB} MB** |" >> "$README_FILE"
+              echo "| **Split Size** | ${SPLIT_MB}MB per part |" >> "$README_FILE"
+              echo "| **Status** | **Complete (100%)** |" >> "$README_FILE"
+              if [ -n "$ZIP_PASSWORD" ]; then
+                echo "| **Password Protected** | **YES** |" >> "$README_FILE"
+              else
+                echo "| **Password Protected** | **NO** |" >> "$README_FILE"
+              fi
+              echo "" >> "$README_FILE"
+              echo "---" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "## Download Links" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "> ⬇️ Download **all parts**, then open \`${FINAL_FOLDER_NAME}.zip\` — the other parts are found automatically." >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "| # | File | Link |" >> "$README_FILE"
+              echo "|---|------|------|" >> "$README_FILE"
               
               LINK_NUM=0
               for part_file in $(ls "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.zip "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.z[0-9]* 2>/dev/null | sort -V); do
@@ -230,28 +228,31 @@ EOF
                   FOLDER_ENCODED=$(urlencode "$FINAL_FOLDER_NAME")
                   RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/repo/${FOLDER_ENCODED}/${PART_ENCODED}"
                   LINK_NUM=$((LINK_NUM + 1))
-                  echo "| ${LINK_NUM} | \`${PART_BASENAME}\` | [Download](${RAW_LINK}) |" >> "$BACKUP_DIR/${FINAL_FOLDER_NAME}/README.md"
+                  echo "| ${LINK_NUM} | \`${PART_BASENAME}\` | [Download](${RAW_LINK}) |" >> "$README_FILE"
                 fi
               done
               
-              cat >> "$BACKUP_DIR/${FINAL_FOLDER_NAME}/README.md" << EOF
-
----
-
-## How to Extract
-
-Download all parts into the **same folder**, then:
-
-| OS | Steps |
-|----|-------|
-| **Windows** | Right-click \`${FINAL_FOLDER_NAME}.zip\` → *Extract Here* (needs [7-Zip](https://www.7-zip.org/)) $([ -n "$ZIP_PASSWORD" ] && echo "→ enter password") |
-| **Mac** | Open with [Keka](https://www.keka.io/) $([ -n "$ZIP_PASSWORD" ] && echo "→ enter password") |
-| **Linux** | \`unzip ${FINAL_FOLDER_NAME}.zip\` $([ -n "$ZIP_PASSWORD" ] && echo "→ enter password") |
-
----
-
-*Downloaded using GitHub Actions File Downloader*
-EOF
+              echo "" >> "$README_FILE"
+              echo "---" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "## How to Extract" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "Download all parts into the **same folder**, then:" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "| OS | Steps |" >> "$README_FILE"
+              echo "|----|-------|" >> "$README_FILE"
+              echo "| **Windows** | Right-click \`${FINAL_FOLDER_NAME}.zip\` → *Extract Here* (needs [7-Zip](https://www.7-zip.org/))" >> "$README_FILE"
+              if [ -n "$ZIP_PASSWORD" ]; then
+                echo "| **Mac** | Open with [Keka](https://www.keka.io/) → enter password |" >> "$README_FILE"
+                echo "| **Linux** | \`unzip ${FINAL_FOLDER_NAME}.zip\` → enter password |" >> "$README_FILE"
+              else
+                echo "| **Mac** | Double-click \`${FINAL_FOLDER_NAME}.zip\` — extracts with Archive Utility |" >> "$README_FILE"
+                echo "| **Linux** | \`unzip ${FINAL_FOLDER_NAME}.zip\` |" >> "$README_FILE"
+              fi
+              echo "" >> "$README_FILE"
+              echo "---" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "*Downloaded using GitHub Actions File Downloader*" >> "$README_FILE"
               
             else
               # Small file - copy directly or create single zip
@@ -272,34 +273,36 @@ EOF
               FILE_ENCODED=$(urlencode "$ARCHIVE_NAME")
               RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/repo/${FOLDER_ENCODED}/${FILE_ENCODED}"
               
-              cat > "$BACKUP_DIR/${FINAL_FOLDER_NAME}/README.md" << EOF
-# ${SANITIZED_NAME}
-
----
-
-## File Information
-
-| Property | Value |
-|----------|-------|
-| **Original Name** | \`${FILENAME}\` |
-| **Source URL** | [Download Source](${URL}) |
-| **Total Size** | **$( [ "$SIZE" -gt 0 ] && echo "${SIZE_MB} MB" || echo "Unknown" )** |
-| **Status** | **Complete (100%)** |
-| **Password Protected** | **$( [ -n "$ZIP_PASSWORD" ] && echo "YES" || echo "NO" )** |
-
----
-
-## Download Link
-
-| # | File | Link |
-|---|------|------|
-| 1 | \`${ARCHIVE_NAME}\` | [Download](${RAW_LINK}) |
-
----
-
-$([ -n "$ZIP_PASSWORD" ] && echo "## Password\n\nThis file is password protected.\n\n" || echo "")
-*Downloaded using GitHub Actions File Downloader*
-EOF
+              README_FILE="$BACKUP_DIR/${FINAL_FOLDER_NAME}/README.md"
+              echo "# ${SANITIZED_NAME}" > "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "---" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "## File Information" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "| Property | Value |" >> "$README_FILE"
+              echo "|----------|-------|" >> "$README_FILE"
+              echo "| **Original Name** | \`${FILENAME}\` |" >> "$README_FILE"
+              echo "| **Source URL** | [Download Source](${URL}) |" >> "$README_FILE"
+              echo "| **Total Size** | **${SIZE_MB} MB** |" >> "$README_FILE"
+              echo "| **Status** | **Complete (100%)** |" >> "$README_FILE"
+              if [ -n "$ZIP_PASSWORD" ]; then
+                echo "| **Password Protected** | **YES** |" >> "$README_FILE"
+              else
+                echo "| **Password Protected** | **NO** |" >> "$README_FILE"
+              fi
+              echo "" >> "$README_FILE"
+              echo "---" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "## Download Link" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "| # | File | Link |" >> "$README_FILE"
+              echo "|---|------|------|" >> "$README_FILE"
+              echo "| 1 | \`${ARCHIVE_NAME}\` | [Download](${RAW_LINK}) |" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "---" >> "$README_FILE"
+              echo "" >> "$README_FILE"
+              echo "*Downloaded using GitHub Actions File Downloader*" >> "$README_FILE"
             fi
             
             # Cleanup
@@ -359,7 +362,7 @@ EOF
               FOLDER_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/tree/${BRANCH}/repo/${FOLDER_ENCODED}"
               
               # Get file size info from README
-              SIZE_INFO=$(grep "Total Size" "$folder/README.md" | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+              SIZE_INFO=$(grep "Total Size" "$folder/README.md" | head -1 | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
               
               echo "| $NUM | \`$FOLDER_NAME\` | ${SIZE_INFO:-Unknown} | [View]($FOLDER_LINK) |" >> "$MASTER_README"
             done
