@@ -57,7 +57,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl wget zip unzip p7zip-full jq bc docker.io
+          sudo apt-get install -y curl wget zip unzip p7zip-full jq bc
           echo "✅ Dependencies installed"
 
       - name: Start WARP Container
@@ -67,6 +67,10 @@ jobs:
           
           # Create network if not exists
           docker network create warp-net || true
+          
+          # Stop and remove existing container if it exists
+          docker stop warp 2>/dev/null || true
+          docker rm warp 2>/dev/null || true
           
           # Run WARP container
           docker run -d \
@@ -193,7 +197,7 @@ jobs:
             echo "${NAME}_${RANDOM_SUFFIX}"
           }
           
-          # Function to download with multiple methods (like your 02.yml)
+          # Function to download with multiple methods
           download_with_methods() {
             local URL="$1"
             local OUTPUT_PATH="$2"
@@ -202,16 +206,24 @@ jobs:
             local METHODS=(
               "curl -L --max-time 600 --connect-timeout 30 $CURL_PROXY"
               "curl -L --max-time 600 --connect-timeout 30 --retry 3 --retry-delay 2 $CURL_PROXY"
-              "wget --timeout=600 --tries=3 $([ -n "$CURL_PROXY" ] && echo "--execute=socks5-proxy=127.0.0.1:1080")"
               "curl -L --max-time 600 --connect-timeout 30 --user-agent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' $CURL_PROXY"
             )
+            
+            # Add wget method if available
+            if command -v wget &> /dev/null; then
+              if [ -n "$CURL_PROXY" ]; then
+                METHODS+=("wget --timeout=600 --tries=3 --execute=socks5-proxy=127.0.0.1:1080 -O")
+              else
+                METHODS+=("wget --timeout=600 --tries=3 -O")
+              fi
+            fi
             
             local METHOD_NUM=0
             for METHOD in "${METHODS[@]}"; do
               METHOD_NUM=$((METHOD_NUM + 1))
               echo "  Trying method $METHOD_NUM/${#METHODS[@]}..."
               
-              if eval "$METHOD -o \"$OUTPUT_PATH\" \"$URL\""; then
+              if eval "$METHOD \"$OUTPUT_PATH\" \"$URL\"" 2>&1; then
                 if [ -f "$OUTPUT_PATH" ] && [ -s "$OUTPUT_PATH" ]; then
                   echo "  ✅ Method $METHOD_NUM successful!"
                   return 0
@@ -291,7 +303,6 @@ jobs:
               if [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ]; then
                 if [ "$SIZE" -ne "$EXPECTED_SIZE" ]; then
                   echo "⚠️ Size mismatch: Downloaded ${SIZE} bytes, expected ${EXPECTED_SIZE} bytes"
-                  # Still accept the file but warn
                 else
                   echo "✅ Size matches expected value"
                 fi
@@ -351,7 +362,7 @@ jobs:
                   PART_SIZE=$(stat -c%s "$part_file" 2>/dev/null || echo 0)
                   TOTAL_PARTS_SIZE=$((TOTAL_PARTS_SIZE + PART_SIZE))
                 fi
-              done
+              done 2>/dev/null
               
               if [ $PART_COUNT -eq 0 ] || [ $TOTAL_PARTS_SIZE -eq 0 ]; then
                 echo "❌ Split failed - no valid parts created"
@@ -365,19 +376,21 @@ jobs:
               
               # Generate README for split file
               README_FILE="$BACKUP_DIR/${FINAL_FOLDER_NAME}/README.md"
-              echo "# ${SANITIZED_NAME}" > "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "---" >> "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "## File Information" >> "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "| Property | Value |" >> "$README_FILE"
-              echo "|----------|-------|" >> "$README_FILE"
-              echo "| **Original Name** | \`${FILENAME}\` |" >> "$README_FILE"
-              echo "| **Source URL** | [Download Source](${URL}) |" >> "$README_FILE"
-              echo "| **File Size** | **${SIZE_MB} MB** |" >> "$README_FILE"
-              echo "| **Split Size** | ${SPLIT_MB}MB per part |" >> "$README_FILE"
-              echo "| **Parts** | ${PART_COUNT} parts |" >> "$README_FILE"
+              cat > "$README_FILE" << 'EOF'
+# ${SANITIZED_NAME}
+
+---
+
+## File Information
+
+| Property | Value |
+|----------|-------|
+| **Original Name** | `${FILENAME}` |
+| **Source URL** | [Download Source](${URL}) |
+| **File Size** | **${SIZE_MB} MB** |
+| **Split Size** | ${SPLIT_MB}MB per part |
+| **Parts** | ${PART_COUNT} parts |
+EOF
               if [ -n "$ZIP_PASSWORD" ]; then
                 echo "| **Password Protected** | **YES** |" >> "$README_FILE"
               else
@@ -386,15 +399,18 @@ jobs:
               if [ "$USE_WARP" = "true" ]; then
                 echo "| **Proxy Used** | Cloudflare WARP |" >> "$README_FILE"
               fi
-              echo "" >> "$README_FILE"
-              echo "---" >> "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "## Download Links" >> "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "> ⬇️ Download **all parts**, then open \`${FINAL_FOLDER_NAME}.zip\`" >> "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "| # | File | Link |" >> "$README_FILE"
-              echo "|---|------|------|" >> "$README_FILE"
+              
+              cat >> "$README_FILE" << 'EOF'
+
+---
+
+## Download Links
+
+> ⬇️ Download **all parts**, then open `${FINAL_FOLDER_NAME}.zip`
+
+| # | File | Link |
+|---|------|------|
+EOF
               
               LINK_NUM=0
               for part_file in $(ls "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.zip "$BACKUP_DIR/${FINAL_FOLDER_NAME}/"*.z[0-9]* 2>/dev/null | sort -V); do
@@ -472,17 +488,19 @@ jobs:
               RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/repo/${FOLDER_ENCODED}/${FILE_ENCODED}"
               
               README_FILE="$BACKUP_DIR/${FINAL_FOLDER_NAME}/README.md"
-              echo "# ${SANITIZED_NAME}" > "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "---" >> "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "## File Information" >> "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "| Property | Value |" >> "$README_FILE"
-              echo "|----------|-------|" >> "$README_FILE"
-              echo "| **Original Name** | \`${FILENAME}\` |" >> "$README_FILE"
-              echo "| **Source URL** | [Download Source](${URL}) |" >> "$README_FILE"
-              echo "| **File Size** | **${SIZE_MB} MB** |" >> "$README_FILE"
+              cat > "$README_FILE" << 'EOF'
+# ${SANITIZED_NAME}
+
+---
+
+## File Information
+
+| Property | Value |
+|----------|-------|
+| **Original Name** | `${FILENAME}` |
+| **Source URL** | [Download Source](${URL}) |
+| **File Size** | **${SIZE_MB} MB** |
+EOF
               if [ -n "$ZIP_PASSWORD" ]; then
                 echo "| **Password Protected** | **YES** |" >> "$README_FILE"
               else
@@ -491,18 +509,21 @@ jobs:
               if [ "$USE_WARP" = "true" ]; then
                 echo "| **Proxy Used** | Cloudflare WARP |" >> "$README_FILE"
               fi
-              echo "" >> "$README_FILE"
-              echo "---" >> "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "## Download Link" >> "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "| # | File | Link |" >> "$README_FILE"
-              echo "|---|------|------|" >> "$README_FILE"
-              echo "| 1 | \`${ARCHIVE_NAME}\` | [Download](${RAW_LINK}) |" >> "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "---" >> "$README_FILE"
-              echo "" >> "$README_FILE"
-              echo "*Downloaded using GitHub Actions File Downloader with WARP support*" >> "$README_FILE"
+              
+              cat >> "$README_FILE" << 'EOF'
+
+---
+
+## Download Link
+
+| # | File | Link |
+|---|------|------|
+| 1 | `${ARCHIVE_NAME}` | [Download](${RAW_LINK}) |
+
+---
+
+*Downloaded using GitHub Actions File Downloader with WARP support*
+EOF
               
               SUCCESSFUL_DOWNLOADS=$((SUCCESSFUL_DOWNLOADS + 1))
             fi
@@ -532,8 +553,8 @@ jobs:
         if: always() && github.event.inputs.use_warp == 'true'
         run: |
           echo "Stopping WARP container..."
-          docker stop warp || true
-          docker rm warp || true
+          docker stop warp 2>/dev/null || true
+          docker rm warp 2>/dev/null || true
           echo "✅ WARP container stopped"
 
       - name: Incremental Commit and Push
@@ -765,4 +786,27 @@ jobs:
           git reset --hard origin/"$BRANCH"
           
           # Create repo directory and copy only non-zero files
-          mkdir
+          mkdir -p repo
+          find "$BACKUP_DIR" -type f -size +0 -exec cp --parents {} repo/ \; 2>/dev/null || true
+          
+          # Collect all non-zero files to push
+          ALL_FILES=()
+          while IFS= read -r -d '' FILE; do
+            if [ -s "$FILE" ]; then
+              ALL_FILES+=("$FILE")
+            fi
+          done < <(find repo -type f -print0 2>/dev/null | sort -z)
+          
+          TOTAL_FILES=${#ALL_FILES[@]}
+          echo "Found $TOTAL_FILES non-zero files to push"
+          
+          if [ $TOTAL_FILES -eq 0 ]; then
+            echo "No valid files to push!"
+            exit 0
+          fi
+          
+          # Calculate total size
+          TOTAL_SIZE=0
+          for F in "${ALL_FILES[@]}"; do
+            if [ -f "$F" ]; then
+              FSIZE=$(stat -c%s "$F" 2>/
