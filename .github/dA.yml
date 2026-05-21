@@ -1,0 +1,57 @@
+name: Download File to Repo Directory (Custom URL)
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'URL of the file to download'
+        required: true
+        type: string
+        default: 'https://example.com/file.zip'
+      filename:
+        description: 'Custom filename (optional)'
+        required: false
+        type: string
+
+jobs:
+  download-file:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Create repo directory
+      run: |
+        mkdir -p repo
+        echo "Created 'repo' directory"
+    
+    - name: Download file
+      run: |
+        FILE_URL="${{ github.event.inputs.file_url }}"
+        
+        # Use custom filename if provided, otherwise extract from URL
+        if [ -n "${{ github.event.inputs.filename }}" ]; then
+          FILENAME="${{ github.event.inputs.filename }}"
+        else
+          FILENAME=$(basename "$FILE_URL")
+        fi
+        
+        # Download the file with progress
+        curl -L --progress-bar -o "repo/$FILENAME" "$FILE_URL"
+        
+        echo "Downloaded to: repo/$FILENAME"
+    
+    - name: List downloaded contents
+      run: |
+        echo "Contents of repo directory:"
+        ls -lah repo/
+    
+    - name: Commit and push changes
+      if: success()
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add repo/
+        git diff --staged --quiet || git commit -m "Add downloaded file to repo directory [skip ci]"
+        git push
